@@ -33,7 +33,9 @@ uses
   uFindFiles,      // TSearchTemplateRec
   uSearchTemplate, // TSearchTemplate
   uColorExt,       // TMaskItem for gColorExt
-  uMasks;          // TMask
+  uMasks,          // TMask
+  RegExpr;
+
 type
 
   TMaskWrap = class
@@ -54,6 +56,7 @@ type
     procedure SetMatchBeg(AValue: Boolean);
     procedure SetMatchEnd(AValue: Boolean);
   public
+    constructor Create(const AValue: String; const AOptions: TMaskOptions = []; const AMatchBeg: Boolean = False; const AMatchEnd: Boolean = False); virtual;
     function Matches(const AFile: TFile): Boolean; virtual; abstract;
 
     property Template:String read FTemplate write SetTemplate;
@@ -70,8 +73,10 @@ type
   protected
     procedure SetCaseSence(ACaseSence: Boolean); override;
     procedure SetTemplate(AValue: String); override;
+
+    function PrepareFilter(const aFileFilter: String): String;
   public
-    constructor Create(const AValue: String; const AOptions: TMaskOptions = []);
+    constructor Create(const AValue: String; const AOptions: TMaskOptions = []; const AMatchBeg: Boolean = False; const AMatchEnd: Boolean = False); override;
     destructor Destroy; override;
 
     function Matches(const AFile: TFile): Boolean; override;
@@ -82,7 +87,7 @@ type
   private
     function Srch(const AFileName: String): Boolean;
   public
-    constructor Create(const AValue: String; const AOptions: TMaskOptions = []);
+    constructor Create(const AValue: String; const AOptions: TMaskOptions = []; const AMatchBeg: Boolean = False; const AMatchEnd: Boolean = False); override;
     function Matches(const AFile: TFile): Boolean; override;
   end;
 
@@ -93,18 +98,19 @@ type
     FSearchTemplate: TSearchTemplate;
     function CreateTempRecord(const AMaskStr: String; const AHideMatch, AIsRegExp: Boolean): TSearchTemplateRec;
   public
-    constructor Create(const AValue: String; const AOptions: TMaskOptions = []);
+    constructor Create(const AValue: String; const AOptions: TMaskOptions = []; const AMatchBeg: Boolean = False; const AMatchEnd: Boolean = False); override;
     destructor Destroy; override;
     function Matches(const AFile: TFile): Boolean; override;
   end;
 
-  TMaskRegEx = class(TMaskTemplate)
+  TMaskRegEx = class(TMaskWrap)
   private
+    FRegExpr: TRegExpr;
     FIsInvalid: Boolean;
   public
-    constructor Create(const AValue: String; const AOptions: TMaskOptions = []);
+    constructor Create(const AValue: String; const AOptions: TMaskOptions = []; const AMatchBeg: Boolean = False; const AMatchEnd: Boolean = False); override;
+    destructor Destroy; override;
     function Matches(const AFile: TFile): Boolean; override;
-    function IsInvalid(const AExpression: String): Boolean;
   end;
 
   TMaskLevenstein = class(TMaskWrap)
@@ -112,7 +118,7 @@ type
     FAllowedDistance: Integer;
     function Distance(const AS1, AS2: String): Byte;
   public
-    constructor Create(const AValue: String; const AOptions: TMaskOptions = []);
+    constructor Create(const AValue: String; const AOptions: TMaskOptions = []; const AMatchBeg: Boolean = False; const AMatchEnd: Boolean = False); override;
     function Matches(const AFile: TFile): Boolean; override;
   end;
 
@@ -130,7 +136,14 @@ type
     function GetCount: Integer;
     function GetItem(Index: Integer): TMaskWrap;
   public
-    constructor Create(const AValue: String; AOrSeparatorCharset: String = ';'; AOptions: TMaskOptions = []; AAndSeparatorCharset: String = '&');
+    constructor Create(
+      const AValue: String;
+      AOrSeparatorCharset: String = ';';
+      AOptions: TMaskOptions = [];
+      AAndSeparatorCharset: String = '&';
+      const AMatchBeg: Boolean = False;
+      const AMatchEnd: Boolean = False
+    );
     destructor Destroy; override;
     function Matches(const AFile: TFile): Boolean;
     property Count: Integer read GetCount;
@@ -144,13 +157,13 @@ uses
   DCConvertEncoding,
   uPinyin,
   uAccentsUtils,
-  uGlobs;
-
+  uGlobs,
+  uRegExpr;
 
 
 procedure TMaskWrap.SetCaseSence(ACaseSence: Boolean);
 begin
-  CaseSensitive := ACaseSence;
+  FCaseSensitive := ACaseSence;
 end;
 
 procedure TMaskWrap.SetTemplate(AValue: String);
@@ -173,22 +186,56 @@ begin
   FMatchEnd := AValue;
 end;
 
-
-
-constructor TMaskExtended.Create(const AValue: String; const AOptions: TMaskOptions = []);
+constructor TMaskWrap.Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean);
 begin
-  FMask := TMask.Create(AValue);
+  inherited Create;
   FUsePinyin := moPinyin in AOptions;
   FCaseSensitive := moCaseSensitive in AOptions;
   FIgnoreAccents := moIgnoreAccents in AOptions;
   FWindowsInterpretation := moWindowsMask in AOptions;
   FNegateResult := False;
+  FMatchBeg := AMatchBeg;
+  FMatchEnd := AMatchEnd;
+end;
 
-  FTemplate := AValue;
-  if FIgnoreAccents then
-    FTemplate := NormalizeAccentedChar(FTemplate);
-  if not FCaseSensitive then
-    FTemplate := UTF8LowerCase(FTemplate);
+
+constructor TMaskExtended.Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean);
+var
+  sModFilter: String;
+begin
+  inherited Create(AValue, AOptions, AMatchBeg, AMatchEnd);
+  sModFilter := PrepareFilter(AValue);
+  FMask := TMask.Create(sModFilter);
+end;
+
+function TMaskExtended.PrepareFilter(const aFileFilter: String): String;
+var
+  Index: Integer;
+  sFileExt: String;
+  sFilterNameNoExt: String;
+begin
+  Result := aFileFilter;
+  if Result <> EmptyStr then
+  begin
+    Index:= Pos('.', Result);
+    if (Index > 0) and ((Index > 1) or FirstDotAtFileNameStartIsExtension) then
+      begin
+        sFileExt := ExtractFileExt(Result);
+        // replaced ExtractOnlyFileName with ChangeFileExt (Standard SysUtils function) TODO verify compatibility
+        sFilterNameNoExt := ChangeFileExt(Result, '');
+        if not (FMatchBeg) then
+          sFilterNameNoExt := '*' + sFilterNameNoExt;
+        if not (FMatchEnd) then
+          sFilterNameNoExt := sFilterNameNoExt + '*';
+        Result := sFilterNameNoExt + sFileExt + '*';
+      end
+    else
+      begin
+        if not (FMatchBeg) then
+          Result := '*' + Result;
+        Result := Result + '*';
+      end;
+  end;
 end;
 
 destructor TMaskExtended.Destroy;
@@ -207,7 +254,7 @@ end;
 procedure TMaskExtended.SetCaseSence(ACaseSence: Boolean);
 begin
   FMask.CaseSensitive := ACaseSence;
-  CaseSensitive := ACaseSence;
+  FCaseSensitive := ACaseSence;
 end;
 
 procedure TMaskExtended.SetTemplate(AValue: String);
@@ -218,13 +265,9 @@ end;
 
 
 
-constructor TMaskAdjacentChar.Create(const AValue: String; const AOptions: TMaskOptions);
+constructor TMaskAdjacentChar.Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean);
 begin
-  FUsePinyin := moPinyin in AOptions;
-  FCaseSensitive := moCaseSensitive in AOptions;
-  FIgnoreAccents := moIgnoreAccents in AOptions;
-  FWindowsInterpretation := moWindowsMask in AOptions;
-  FNegateResult := False;
+  inherited Create(AValue, AOptions, AMatchBeg, AMatchEnd);
 
   FTemplate := AValue;
   if FIgnoreAccents then
@@ -301,7 +344,7 @@ end;
 
 
 
-constructor TMaskTemplate.Create(const AValue: String; const AOptions: TMaskOptions = []);
+constructor TMaskTemplate.Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean);
 begin
   FTemplate := AValue;
   if FIgnoreAccents then
@@ -450,154 +493,66 @@ end;
 
 
 
-constructor TMaskRegEx.Create(const AValue: String; const AOptions: TMaskOptions);
+constructor TMaskRegEx.Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean);
+var
+  LValue: String;
 begin
-  FIsInvalid := IsInvalid(AValue);
+  inherited Create(AValue, AOptions, AMatchBeg, AMatchEnd);
+  FTemplate := AValue;
 
-  if not FIsInvalid then
-  begin
-    // create new temporary template with given mask
-    if (FSearchTemplate = nil) then
-      FSearchTemplate := TSearchTemplate.Create;
-    FSearchTemplate.TemplateName := 'TemporaryMaskRegExp';
-    FSearchTemplate.SearchRecord := CreateTempRecord(AValue, False, True);
+  LValue := AValue;
+
+  FRegExpr := TRegExpr.Create;
+  try
+    FRegExpr.ModifierI := not FCaseSensitive; // or: LValue := '(?i)' + LValue;
+
+    if FMatchBeg and ((Length(LValue) > 0) and (LValue[1] <> '^')) then
+      LValue := '^' + LValue;
+    if FMatchEnd and ((Length(LValue) > 0) and (LValue[Length(LValue)] <> '$')) then
+      LValue := LValue + '$';
+
+    FRegExpr.Expression := LValue;
+    FIsInvalid := False;
+  except
+    FIsInvalid := True;
   end;
-
 end;
 
-function TMaskRegEx.IsInvalid(const AExpression: String): Boolean;
-var
-  S: String;
-  I,Aca,Acb,Acc: Integer;
-  AEscape,ASquareContent,ACurlyContent: Boolean;
+destructor TMaskRegEx.Destroy;
 begin
-  I := 0;
-  Aca := 0;
-  Acb := 0;
-  Acc := 0;
-  // escape backslash (True == no backslash; False == backslash and is 0 coverted to int which is added to counters)
-  AEscape := True;
-  // verify non empty brackets
-  ASquareContent := True;
-  ACurlyContent := True;
-
-  while I <= Length(AExpression) do
-  begin
-    // check unbalanced and incorrectly placed brackets to prevent trying to compile most of unvalid expressions
-    S := AExpression[I];
-    case S of
-      '(': begin
-        Aca := Aca + Ord(AEscape);
-        AEscape := True;
-      end;
-
-      ')': begin
-        if Aca = 0 then
-        begin
-          Result := True;
-          Exit;
-        end;
-        Aca := Aca - Ord(AEscape);
-        AEscape := True;
-      end;
-
-      '[': begin
-        Acb := Acb + Ord(AEscape);
-        AEscape := True;
-        ASquareContent := False;
-      end;
-
-      ']': begin
-        if Acb = 0 then
-        begin
-          Result := True;
-          Exit;
-        end;
-        Acb := Acb - Ord(AEscape);
-        AEscape := True;
-      end;
-
-      '{': begin
-        Acc := Acc + Ord(AEscape);
-        AEscape := True;
-        ACurlyContent := False;
-      end;
-
-      '}': begin
-        if Acc = 0 then
-        begin
-          Result := True;
-          Exit;
-        end;
-        Acc := Acc - Ord(AEscape);
-        AEscape := True;
-      end;
-
-      '\': begin
-        AEscape := not AEscape;
-      end;
-
-      '0','1','2','3','4','5','6','7','8','9',',': begin
-        ASquareContent := True;
-        ACurlyContent := True;
-        AEscape := True;
-      end;
-
-      else
-      begin
-        if (Acc = 0) and (Acb = 0) then
-        begin
-          AEscape := True;
-        end
-
-        else
-        begin
-          if Acb > 0 then
-          begin
-            ASquareContent := True;
-            AEscape := True;
-          end
-          else
-          begin
-            Result := True;
-            Exit;
-          end;
-        end;
-
-      end;
-
-
-    end;
-
-    I := I + 1;
-  end;
-
-  Result := not ((Aca = 0) and (Acb = 0) and (Acc = 0) and ASquareContent and ACurlyContent);
+  FRegExpr.Free;
+  inherited Destroy;
 end;
 
 function TMaskRegEx.Matches(const AFile: TFile): Boolean;
+var
+  LFileName: String;
 begin
-  if FIsInvalid then
-  begin
-    Result := True;
-    Exit;
-  end;
+  Result := True;
+  if not Assigned(FRegExpr) or FIsInvalid then
+    Exit; // expression syntax error
 
-  Result := inherited Matches(AFile);
+  LFileName := AFile.Name;
+
+  // if FUsePinyin then
+  //   LFileName := ChineseToPinyin(LFileName);
+  if FIgnoreAccents then
+    LFileName := NormalizeAccentedChar(LFileName);
+  if not FCaseSensitive then
+    LFileName := UTF8LowerCase(LFileName);
+
+  try
+    Result := FRegExpr.Exec(LFileName);
+  except
+    Result := True; // execution failure
+  end;
 end;
 
 
 
-constructor TMaskLevenstein.Create(const AValue: String; const AOptions: TMaskOptions);
+constructor TMaskLevenstein.Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean);
 begin
-  FUsePinyin := moPinyin in AOptions;
-  FCaseSensitive := moCaseSensitive in AOptions;
-  FIgnoreAccents := moIgnoreAccents in AOptions;
-  FWindowsInterpretation := moWindowsMask in AOptions;
-  FMatchBeg := False;
-  FMatchEnd := False;
-  FNegateResult := False;
-
+  inherited Create(AValue, AOptions, AMatchBeg, AMatchEnd);
   FTemplate := AValue;
   if FIgnoreAccents then
     FTemplate := NormalizeAccentedChar(FTemplate);
@@ -619,9 +574,8 @@ end;
 function TMaskLevenstein.Distance(const AS1, AS2: String): Byte;
 var
   ACharS1, ACharS2: Char;
-  ALengthS1, ALengthS2, I, J, ACostCurrent, ACostLeft, ACostAbove: Byte;
-  // AArr: array of Integer; // dynamic arrays cause crash down the lane...
-  AArr: array[1..255] of Byte;
+  ALengthS1, ALengthS2, I, J, ACostCurrent, ACostLeft, ACostAbove: Integer;
+  AArr: array of Integer;
 begin
   ALengthS1 := Length(AS1);
   ALengthS2 := Length(AS2);
@@ -644,7 +598,7 @@ begin
     Exit;
   end;
 
-  // SetLength(AArr, ALengthS2);
+  SetLength(AArr, ALengthS2 + 1);
   for I := 1 to ALengthS2 do
   begin
     AArr[I] := I;
@@ -673,13 +627,11 @@ begin
           ACostCurrent := ACostAbove; // deletion
         ACostCurrent := ACostCurrent + 1;
       end;
-
       AArr[J] := ACostCurrent;
     end;
-
   end;
 
-  // SetLength(AArr, 0);
+  SetLength(AArr, 0);
   Result := ACostCurrent;
 end;
 
@@ -765,8 +717,13 @@ begin
   AMaskOperatorArray[O-1] := True; // ignore & at the end
 end;
 
-
-constructor TMaskListExtended.Create( const AValue: String; AOrSeparatorCharset: String; AOptions: TMaskOptions; AAndSeparatorCharset: String);
+constructor TMaskListExtended.Create(
+  const AValue: String;
+  AOrSeparatorCharset: String;
+  AOptions: TMaskOptions;
+  AAndSeparatorCharset: String;
+  const AMatchBeg: Boolean;
+  const AMatchEnd: Boolean);
 var
   S: TParseStringListExtended;
   AMaskOperatorArray: TMaskOperatorArray;
@@ -785,31 +742,31 @@ begin
     for I := 0 to S.Count - 1 do
     begin
       AActivationChar := S[I][1];
-      // TODO allow user to define custom AActivationChar instead: \/<>#!
 
+      // TODO future plans: allow user to define custom AActivationChar instead: \/<>#!
       if (Pos(AActivationChar, '\/<>#!') > 0) and (Length(S[I]) = 1) then
       begin
-        // Only Activation character - keep track for AND operators functionality
-        FMasks.Add(TMaskExtended.Create('*', AOptions));
+        // only activation character - needed to keep track for AND operators functionality
+        FMasks.Add(TMaskExtended.Create('*', AOptions, AMatchBeg, AMatchEnd));
         Continue;
       end
       else
         AMaskStr := RightStr(S[I], Length(S[I])-1); // cut off activation character
 
       case AActivationChar of
-        '#': FMasks.Add(TMaskExtended.Create(AMaskStr, AOptions));
+        '#': FMasks.Add(TMaskExtended.Create(AMaskStr, AOptions, AMatchBeg, AMatchEnd));
         '!':
           begin
-            AMaskObj := TMaskExtended.Create(AMaskStr, AOptions);
+            AMaskObj := TMaskExtended.Create(AMaskStr, AOptions, AMatchBeg, AMatchEnd);
             AMaskObj.NegateResult := True; // only for this filter
             FMasks.Add(AMaskObj);
           end;
-        '/': FMasks.Add(TMaskAdjacentChar.Create(AMaskStr, AOptions));
-        '\': FMasks.Add(TMaskRegEx.Create(AMaskStr, AOptions));
-        '<': FMasks.Add(TMaskLevenstein.Create(AMaskStr, AOptions));
-        '>': FMasks.Add(TMaskTemplate.Create(AMaskStr, AOptions));
+        '/': FMasks.Add(TMaskAdjacentChar.Create(AMaskStr, AOptions, AMatchBeg, AMatchEnd));
+        '\': FMasks.Add(TMaskRegEx.Create(AMaskStr, AOptions, AMatchBeg, AMatchEnd));
+        '<': FMasks.Add(TMaskLevenstein.Create(AMaskStr, AOptions, AMatchBeg, AMatchEnd));
+        '>': FMasks.Add(TMaskTemplate.Create(AMaskStr, AOptions, AMatchBeg, AMatchEnd));
         else
-          FMasks.Add(TMaskExtended.Create(S[I], AOptions));
+          FMasks.Add(TMaskExtended.Create(S[I], AOptions, AMatchBeg, AMatchEnd));
       end;
 
     end;
