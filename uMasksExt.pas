@@ -158,6 +158,7 @@ uses
   uPinyin,
   uAccentsUtils,
   uGlobs,
+  DCStrUtils,   // ExtractOnlyFileName
   uRegExpr;
 
 
@@ -221,8 +222,7 @@ begin
     if (Index > 0) and ((Index > 1) or FirstDotAtFileNameStartIsExtension) then
       begin
         sFileExt := ExtractFileExt(Result);
-        // replaced ExtractOnlyFileName with ChangeFileExt (Standard SysUtils function) TODO verify compatibility
-        sFilterNameNoExt := ChangeFileExt(Result, '');
+        sFilterNameNoExt := ExtractOnlyFileName(Result); // or ChangeFileExt(Result, '');
         if not (FMatchBeg) then
           sFilterNameNoExt := '*' + sFilterNameNoExt;
         if not (FMatchEnd) then
@@ -682,39 +682,85 @@ end;
 
 constructor TParseStringListExtended.Create(const AText, AOrSeparators: String; AAndSeparators: String; var AMaskOperatorArray: TMaskOperatorArray);
 var
-  I, S, O: Integer;
+  // this function creates "list" of strings for masks, while it puts template mask at the end
+  // of the connected chains with AND -> this way they are applied last to minimum possible results
+  // eg. ">A B C;D" --> "B C >A;D"
+  // additionally it tracks OR/AND operators as booleans in AMaskOperatorArray
+  iIndex, iChainEnd, jIndex, kIndex, iLen: Integer;
+  sMask: String;
+  bHasTemplates: Boolean;
+  iListSizeBefore: Integer;
 begin
   inherited Create;
-  O := 0;
-  S := 1;
-  SetLength(AMaskOperatorArray, 1);
-  for I := 1 to Length(AText) do
+  SetLength(AMaskOperatorArray, 0);
+
+  iIndex := 1;
+  iLen := Length(AText);
+
+  while iIndex <= iLen do
   begin
-
-    if Pos(AText[I], AOrSeparators) > 0 then
-      AMaskOperatorArray[O] := True
-    else if Pos(AText[I], AAndSeparators) > 0 then
-      AMaskOperatorArray[O] := False
-    else
-      Continue;
-
-    if I > S then
+    bHasTemplates := False;
+    iListSizeBefore := Self.Count;
+    // find the end of the current AND chain (marked by OrSeparator or EndOfString)
+    iChainEnd := iIndex;
+    while (iChainEnd <= iLen) and (Pos(AText[iChainEnd], AOrSeparators) = 0) do
+      iChainEnd := iChainEnd + 1;
+    jIndex := iIndex;
+    while jIndex < iChainEnd do
     begin
-      O := O + 1;
-      SetLength(AMaskOperatorArray, O+1);
-      Add(Copy(AText, S, I - S));
+      kIndex := jIndex;
+      while (kIndex < iChainEnd) and (Pos(AText[kIndex], AAndSeparators) = 0) do
+        kIndex := kIndex + 1;
+
+      if kIndex > jIndex then
+      begin
+        sMask := Copy(AText, jIndex, kIndex - jIndex);
+        if (Length(sMask) > 0) and (sMask[1] <> '>') then
+        begin
+          Self.Add(sMask);
+          SetLength(AMaskOperatorArray, Length(AMaskOperatorArray) + 1);
+          // set operator to False (AND), will fix the last one later
+          AMaskOperatorArray[High(AMaskOperatorArray)] := False;
+        end
+        else if (Length(sMask) > 0) and (sMask[1] = '>') then
+        begin
+          bHasTemplates := True;
+        end;
+      end;
+
+      jIndex := kIndex + 1; // move past separator
     end;
 
-    S := I + 1;
-  end;
+    if bHasTemplates then // if templates exist, add masks starting with '>'
+    begin
+      jIndex := iIndex;
+      while jIndex < iChainEnd do
+      begin
+        kIndex := jIndex;
+        while (kIndex < iChainEnd) and (Pos(AText[kIndex], AAndSeparators) = 0) do
+          kIndex := kIndex + 1;
 
-  if Length(AText) >= S then
-  begin
-    O := O + 1;
-    Add(Copy(AText, S, Length(AText) - S + 1));
-  end;
+        if kIndex > jIndex then
+        begin
+          sMask := Copy(AText, jIndex, kIndex - jIndex);
+          if (Length(sMask) > 0) and (sMask[1] = '>') then
+          begin
+            Self.Add(sMask);
+            SetLength(AMaskOperatorArray, Length(AMaskOperatorArray) + 1);
+            AMaskOperatorArray[High(AMaskOperatorArray)] := False;
+          end;
+        end;
 
-  AMaskOperatorArray[O-1] := True; // ignore & at the end
+        jIndex := kIndex + 1;
+      end;
+    end;
+
+    // fix end of the string + OR operator to True
+    if Self.Count > iListSizeBefore then
+      AMaskOperatorArray[High(AMaskOperatorArray)] := True;
+
+    iIndex := iChainEnd + 1;
+  end;
 end;
 
 constructor TMaskListExtended.Create(
