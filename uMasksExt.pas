@@ -116,9 +116,11 @@ type
   TMaskLevenstein = class(TMaskWrap)
   private
     FAllowedDistance: Integer;
+    FDistanceBuffer: array of Integer;
     function Distance(const AS1, AS2: String): Byte;
   public
     constructor Create(const AValue: String; const AOptions: TMaskOptions = []; const AMatchBeg: Boolean = False; const AMatchEnd: Boolean = False); override;
+    destructor Destroy; override;
     function Matches(const AFile: TFile): Boolean; override;
   end;
 
@@ -222,7 +224,7 @@ begin
     if (Index > 0) and ((Index > 1) or FirstDotAtFileNameStartIsExtension) then
       begin
         sFileExt := ExtractFileExt(Result);
-        sFilterNameNoExt := ExtractOnlyFileName(Result); // or ChangeFileExt(Result, '');
+        sFilterNameNoExt := ExtractOnlyFileName(Result);
         if not (FMatchBeg) then
           sFilterNameNoExt := '*' + sFilterNameNoExt;
         if not (FMatchEnd) then
@@ -318,7 +320,7 @@ var
   // Example: "abcd" is same as default doublecmd search "a*b*c*d"
   // (no extra * typing) and it matches for example a_best_cedr
   AFileName: String;
-  ALT, ALF: Integer;
+  ALenTemplate, ALenFileName: Integer;
 begin
   AFileName := AFile.Name;
   if FIgnoreAccents then
@@ -326,12 +328,12 @@ begin
   if not FCaseSensitive then
     AFileName := UTF8LowerCase(AFileName);
 
-  ALT := Length(FTemplate);
-  ALF := Length(AFileName);
+  ALenTemplate := Length(FTemplate);
+  ALenFileName := Length(AFileName);
 
   if (
-    (ALT > 0) and (ALF > 0) and
-    (not FMatchEnd or (FMatchEnd and (FTemplate[ALT] = AFileName[ALF]))) and
+    (ALenTemplate > 0) and (ALenFileName > 0) and
+    (not FMatchEnd or (FMatchEnd and (FTemplate[ALenTemplate] = AFileName[ALenFileName]))) and
     (not FMatchBeg or (FMatchBeg and (FTemplate[1] = AFileName[1])))
   ) then
     Result := Srch(AFileName)
@@ -504,7 +506,7 @@ begin
 
   FRegExpr := TRegExpr.Create;
   try
-    FRegExpr.ModifierI := not FCaseSensitive; // or: LValue := '(?i)' + LValue;
+    FRegExpr.ModifierI := not FCaseSensitive;
 
     if FMatchBeg and ((Length(LValue) > 0) and (LValue[1] <> '^')) then
       LValue := '^' + LValue;
@@ -571,11 +573,16 @@ begin
 
 end;
 
+destructor TMaskLevenstein.Destroy;
+begin
+  SetLength(FDistanceBuffer, 0);
+  inherited Destroy;
+end;
+
 function TMaskLevenstein.Distance(const AS1, AS2: String): Byte;
 var
   ACharS1, ACharS2: Char;
   ALengthS1, ALengthS2, I, J, ACostCurrent, ACostLeft, ACostAbove: Integer;
-  AArr: array of Integer;
 begin
   ALengthS1 := Length(AS1);
   ALengthS2 := Length(AS2);
@@ -598,10 +605,12 @@ begin
     Exit;
   end;
 
-  SetLength(AArr, ALengthS2 + 1);
+  if Length(FDistanceBuffer) < (ALengthS2 + 1) then
+    SetLength(FDistanceBuffer, ALengthS2 + 1);
+
   for I := 1 to ALengthS2 do
   begin
-    AArr[I] := I;
+    FDistanceBuffer[I] := I;
   end;
 
   ACharS1 := AS1[1];
@@ -616,7 +625,7 @@ begin
     begin
       ACostAbove := ACostCurrent;
       ACostCurrent := ACostLeft;
-      ACostLeft := AArr[J];
+      ACostLeft := FDistanceBuffer[J];
       ACharS2 := AS2[J];
 
       if not (ACharS1 = ACharS2) then
@@ -627,11 +636,10 @@ begin
           ACostCurrent := ACostAbove; // deletion
         ACostCurrent := ACostCurrent + 1;
       end;
-      AArr[J] := ACostCurrent;
+      FDistanceBuffer[J] := ACostCurrent;
     end;
   end;
 
-  SetLength(AArr, 0);
   Result := ACostCurrent;
 end;
 
