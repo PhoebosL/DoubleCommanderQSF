@@ -1,7 +1,6 @@
 {
    Double Commander
    -------------------------------------------------------------------------
-   Load colors of files in file panels
 
    Copyright (C) 2024 Alexander Koblov (alexx2000@mail.ru)
 
@@ -56,7 +55,7 @@ type
     procedure SetMatchBeg(AValue: Boolean);
     procedure SetMatchEnd(AValue: Boolean);
   public
-    constructor Create(const AValue: String; const AOptions: TMaskOptions = []; const AMatchBeg: Boolean = False; const AMatchEnd: Boolean = False); virtual;
+    constructor Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean); virtual;
     function Matches(const AFile: TFile): Boolean; virtual; abstract;
 
     property Template:String read FTemplate write SetTemplate;
@@ -76,9 +75,17 @@ type
 
     function PrepareFilter(const aFileFilter: String): String;
   public
-    constructor Create(const AValue: String; const AOptions: TMaskOptions = []; const AMatchBeg: Boolean = False; const AMatchEnd: Boolean = False); override;
+    constructor Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean); override;
     destructor Destroy; override;
 
+    function Matches(const AFile: TFile): Boolean; override;
+  end;
+
+  TMaskSimple = class(TMaskWrap)
+  private
+    FMaskLength: Integer;
+  public
+    constructor Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean); override;
     function Matches(const AFile: TFile): Boolean; override;
   end;
 
@@ -87,7 +94,7 @@ type
   private
     function Srch(const AFileName: String): Boolean;
   public
-    constructor Create(const AValue: String; const AOptions: TMaskOptions = []; const AMatchBeg: Boolean = False; const AMatchEnd: Boolean = False); override;
+    constructor Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean); override;
     function Matches(const AFile: TFile): Boolean; override;
   end;
 
@@ -98,7 +105,7 @@ type
     FSearchTemplate: TSearchTemplate;
     function CreateTempRecord(const AMaskStr: String; const AHideMatch, AIsRegExp: Boolean): TSearchTemplateRec;
   public
-    constructor Create(const AValue: String; const AOptions: TMaskOptions = []; const AMatchBeg: Boolean = False; const AMatchEnd: Boolean = False); override;
+    constructor Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean); override;
     destructor Destroy; override;
     function Matches(const AFile: TFile): Boolean; override;
   end;
@@ -108,7 +115,7 @@ type
     FRegExpr: TRegExpr;
     FIsInvalid: Boolean;
   public
-    constructor Create(const AValue: String; const AOptions: TMaskOptions = []; const AMatchBeg: Boolean = False; const AMatchEnd: Boolean = False); override;
+    constructor Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean); override;
     destructor Destroy; override;
     function Matches(const AFile: TFile): Boolean; override;
   end;
@@ -119,7 +126,7 @@ type
     FDistanceBuffer: array of Integer;
     function Distance(const AS1, AS2: String): Byte;
   public
-    constructor Create(const AValue: String; const AOptions: TMaskOptions = []; const AMatchBeg: Boolean = False; const AMatchEnd: Boolean = False); override;
+    constructor Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean); override;
     destructor Destroy; override;
     function Matches(const AFile: TFile): Boolean; override;
   end;
@@ -265,6 +272,47 @@ begin
   FTemplate := AValue;
 end;
 
+
+constructor TMaskSimple.Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean);
+var
+    Alol: String;
+begin
+  inherited Create(AValue, AOptions, AMatchBeg, AMatchEnd);
+  FTemplate := AValue;
+  if FIgnoreAccents then
+    FTemplate := NormalizeAccentedChar(FTemplate);
+  if not FCaseSensitive then
+    FTemplate := UTF8LowerCase(FTemplate);
+  FMaskLength := Length(FTemplate);
+end;
+
+function TMaskSimple.Matches(const AFile: TFile): Boolean;
+var
+  AFileName: String;
+  APos: Integer;
+begin
+  AFileName := AFile.Name;
+  if FIgnoreAccents then
+    AFileName := NormalizeAccentedChar(AFileName);
+  if not FCaseSensitive then
+    AFileName := UTF8LowerCase(AFileName);
+
+  APos := Pos(FTemplate, AFileName);
+  if APos = 0 then
+    Result := False
+  else
+  begin
+    if FMatchBeg and (APos <> 1) then
+      Result := False
+    else if FMatchEnd and (APos + FMaskLength <> Length(AFileName) + 1) then
+      Result := False
+    else
+      Result := True;
+  end;
+
+  if FNegateResult then
+    Result := not Result;
+end;
 
 
 constructor TMaskAdjacentChar.Create(const AValue: String; const AOptions: TMaskOptions; const AMatchBeg: Boolean; const AMatchEnd: Boolean);
@@ -690,28 +738,34 @@ end;
 
 constructor TParseStringListExtended.Create(const AText, AOrSeparators: String; AAndSeparators: String; var AMaskOperatorArray: TMaskOperatorArray);
 var
-  // this function creates "list" of strings for masks, while it puts template mask at the end
-  // of the connected chains with AND -> this way they are applied last to minimum possible results
-  // eg. ">A B C;D" --> "B C >A;D"
-  // additionally it tracks OR/AND operators as booleans in AMaskOperatorArray
-  iIndex, iChainEnd, jIndex, kIndex, iLen: Integer;
-  sMask: String;
-  bHasTemplates: Boolean;
-  iListSizeBefore: Integer;
+  // function tracks OR/AND operators as booleans in AMaskOperatorArray
+  // this function creates "list" of strings for masks with 2 conditions:
+  // 1) it puts template mask at the end of the connected chains with AND
+  // -> this way they are applied last to minimum possible results eg. ">A B C;D" --> "B C >A;D"
+  // 2) it puts masks without wildcards ?.* to the front so they are processed
+  // first with TMaskSimple as quickly as possible eg. "*txt test" --> "test #*txt"
+  // and marks mask with wild cards with # so they are processed with TMaskExtended
+  iIndex, iChainEnd, jIndex, kIndex, ATextLength, iCharPos: Integer;
+  AMaskStr: String;
+  AHasTemplates: Boolean;
+  AListSizeCount: Integer;
+  AHasWildcards: Boolean;
+  AStartAndBlockIndex: Integer;
 begin
   inherited Create;
   SetLength(AMaskOperatorArray, 0);
 
   iIndex := 1;
-  iLen := Length(AText);
+  ATextLength := Length(AText);
 
-  while iIndex <= iLen do
+  while iIndex <= ATextLength do
   begin
-    bHasTemplates := False;
-    iListSizeBefore := Self.Count;
+    AStartAndBlockIndex := Self.Count;
+    AHasTemplates := False;
+    AListSizeCount := Self.Count;
     // find the end of the current AND chain (marked by OrSeparator or EndOfString)
     iChainEnd := iIndex;
-    while (iChainEnd <= iLen) and (Pos(AText[iChainEnd], AOrSeparators) = 0) do
+    while (iChainEnd <= ATextLength) and (Pos(AText[iChainEnd], AOrSeparators) = 0) do
       iChainEnd := iChainEnd + 1;
     jIndex := iIndex;
     while jIndex < iChainEnd do
@@ -722,24 +776,52 @@ begin
 
       if kIndex > jIndex then
       begin
-        sMask := Copy(AText, jIndex, kIndex - jIndex);
-        if (Length(sMask) > 0) and (sMask[1] <> '>') then
+        AMaskStr := Copy(AText, jIndex, kIndex - jIndex);
+        if (Length(AMaskStr) > 0) and (AMaskStr[1] = '>') then
         begin
-          Self.Add(sMask);
+          AHasTemplates := True;
+        end
+        else if (Length(AMaskStr) > 0) and (Pos(AMaskStr[1], '\/<#!') > 0) then
+        begin
+          Self.Add(AMaskStr);
           SetLength(AMaskOperatorArray, Length(AMaskOperatorArray) + 1);
-          // set operator to False (AND), will fix the last one later
+          // initialize operator as AND=>False and change it to OR once the end of chain is found
           AMaskOperatorArray[High(AMaskOperatorArray)] := False;
         end
-        else if (Length(sMask) > 0) and (sMask[1] = '>') then
+        else
         begin
-          bHasTemplates := True;
+          // handle masks without activation characters
+          AHasWildcards := False;
+          if Length(AMaskStr) > 0 then
+          begin
+            for iCharPos := 1 to Length(AMaskStr) do
+            begin
+              if (AMaskStr[iCharPos] = '?') or (AMaskStr[iCharPos] = '.') or (AMaskStr[iCharPos] = '*') then
+              begin
+                AHasWildcards := True;
+                Break;
+              end;
+            end;
+          end;
+
+          if AHasWildcards then
+          begin
+            Self.Add('#' + AMaskStr); // for TMaskExtended
+          end
+          else
+          begin
+            Self.Insert(AStartAndBlockIndex, AMaskStr); // for TMaskSimpleSearch
+            AStartAndBlockIndex := AStartAndBlockIndex + 1;
+          end;
+          SetLength(AMaskOperatorArray, Length(AMaskOperatorArray) + 1);
+          AMaskOperatorArray[High(AMaskOperatorArray)] := False;
         end;
       end;
 
       jIndex := kIndex + 1; // move past separator
     end;
 
-    if bHasTemplates then // if templates exist, add masks starting with '>'
+    if AHasTemplates then // if templates exist, add masks starting with '>'
     begin
       jIndex := iIndex;
       while jIndex < iChainEnd do
@@ -750,10 +832,10 @@ begin
 
         if kIndex > jIndex then
         begin
-          sMask := Copy(AText, jIndex, kIndex - jIndex);
-          if (Length(sMask) > 0) and (sMask[1] = '>') then
+          AMaskStr := Copy(AText, jIndex, kIndex - jIndex);
+          if (Length(AMaskStr) > 0) and (AMaskStr[1] = '>') then
           begin
-            Self.Add(sMask);
+            Self.Add(AMaskStr);
             SetLength(AMaskOperatorArray, Length(AMaskOperatorArray) + 1);
             AMaskOperatorArray[High(AMaskOperatorArray)] := False;
           end;
@@ -764,7 +846,7 @@ begin
     end;
 
     // fix end of the string + OR operator to True
-    if Self.Count > iListSizeBefore then
+    if Self.Count > AListSizeCount then
       AMaskOperatorArray[High(AMaskOperatorArray)] := True;
 
     iIndex := iChainEnd + 1;
@@ -820,7 +902,7 @@ begin
         '<': FMasks.Add(TMaskLevenstein.Create(AMaskStr, AOptions, AMatchBeg, AMatchEnd));
         '>': FMasks.Add(TMaskTemplate.Create(AMaskStr, AOptions, AMatchBeg, AMatchEnd));
         else
-          FMasks.Add(TMaskExtended.Create(S[I], AOptions, AMatchBeg, AMatchEnd));
+          FMasks.Add(TMaskSimple.Create(S[I], AOptions, AMatchBeg, AMatchEnd));
       end;
 
     end;
